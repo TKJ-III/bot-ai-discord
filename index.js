@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, AttachmentBuilder } = require('discord.js');
 const axios = require('axios');
 
 const client = new Client({
@@ -13,14 +13,14 @@ const client = new Client({
 });
 
 // Model OpenRouter gratisan yang valid & support gambar (multimodal)
-const AI_MODEL = 'inclusionai/ling-3.0-flash-vl:free';
+const AI_MODEL = 'liquid/lfm-2.5-2.6b:free';
 
 let totalTokensUsed = 0; // Akumulasi hitungan token/kredit AI
 
 // Event saat bot online
 client.once('clientReady', () => {
   console.log(`✅ Bot berhasil login sebagai: ${client.user.tag}`);
-  client.user.setActivity(`Model: inclusionai/ling-3.0 | Used: 0 Tokens`, { type: 4 });
+  client.user.setActivity(`Model: liquid/lfm-2.5-2.6b:free | Used: 0 Tokens`, { type: 4 });
 });
 
 client.on('messageCreate', async (message) => {
@@ -36,7 +36,7 @@ client.on('messageCreate', async (message) => {
 
       // 2. Olah Teks Prompt dan Fitur Reply
       let promptText = message.content.replace(`<@${client.user.id}>`, '').trim();
-      const contentPayload = [];
+      const imagePayloads = [];
 
       let referencedText = '';
       if (message.reference && message.reference.messageId) {
@@ -47,10 +47,11 @@ client.on('messageCreate', async (message) => {
             referencedText = `[Pesan yang dibalas: "${referencedMessage.content}"]\n\n`;
           }
 
+          // Proses gambar dari pesan yang direply
           if (referencedMessage.attachments.size > 0) {
             referencedMessage.attachments.forEach(attachment => {
               if (attachment.contentType && attachment.contentType.startsWith('image/')) {
-                contentPayload.push({
+                imagePayloads.push({
                   type: "image_url",
                   image_url: { url: attachment.url }
                 });
@@ -62,22 +63,36 @@ client.on('messageCreate', async (message) => {
         }
       }
 
-      const fullPrompt = referencedText + promptText;
-
-      if (fullPrompt) {
-        contentPayload.push({ type: "text", text: fullPrompt });
+      // Olah File dan Gambar dari pesan saat ini (Gunakan for...of untuk mendukung async/await)
+      for (const [key, attachment] of message.attachments) {
+        if (attachment.contentType && attachment.contentType.startsWith('image/')) {
+          // Jika gambar, tambahkan ke payload multimodal
+          imagePayloads.push({
+            type: "image_url",
+            image_url: { url: attachment.url }
+          });
+        } else if (
+          (attachment.contentType && attachment.contentType.startsWith('text/')) || 
+          attachment.name.match(/\.(js|ts|py|html|css|json|cpp|txt|md|csv)$/i)
+        ) {
+          // Jika file berupa teks/kode, kita download isinya dan berikan ke AI untuk dibaca
+          try {
+            const fileRes = await axios.get(attachment.url, { responseType: 'text' });
+            promptText += `\n\n--- Isi dari file lampiran: ${attachment.name} ---\n${fileRes.data}\n--- Akhir dari file ---`;
+          } catch (e) {
+            console.error(`Gagal mendownload isi file ${attachment.name}:`, e.message);
+            promptText += `\n\n[Sistem gagal membaca isi lampiran file ${attachment.name}]`;
+          }
+        }
       }
 
-      // Olah Gambar dari pesan saat ini
-      if (message.attachments.size > 0) {
-        message.attachments.forEach(attachment => {
-          if (attachment.contentType && attachment.contentType.startsWith('image/')) {
-            contentPayload.push({
-              type: "image_url",
-              image_url: { url: attachment.url }
-            });
-          }
-        });
+      const fullTextPrompt = referencedText + promptText;
+      let finalMessageContent;
+
+      if (imagePayloads.length > 0) {
+        finalMessageContent = [{ type: "text", text: fullTextPrompt }, ...imagePayloads];
+      } else {
+        finalMessageContent = fullTextPrompt || "Halo!";
       }
 
       // 3. Panggil API OpenRouter (Hanya 1 kali penulisan response)
@@ -87,8 +102,12 @@ client.on('messageCreate', async (message) => {
           model: AI_MODEL,
           messages: [
             {
+              role: 'system',
+              content: 'Kamu adalah asisten AI di Discord. Kamu dapat membaca isi file teks/kode yang dikirim pengguna. JIKA kamu ingin memberikan/mengirim file kembali ke pengguna (misalnya file kode script, atau teks panjang), kamu WAJIB menggunakan format berikut dalam jawabanmu:\n\n[FILE:nama_file.ekstensi]\nTulis semua isi file disini...\n[/FILE]\n\nKamu boleh mengirim banyak file dalam satu jawaban dengan menggunakan format tersebut berulang kali.'
+            },
+            {
               role: 'user',
-              content: contentPayload.length > 0 ? contentPayload : fullPrompt
+              content: finalMessageContent
             }
           ]
         },
@@ -102,11 +121,10 @@ client.on('messageCreate', async (message) => {
         }
       );
 
-      // Safe-guard jika respon teks dari AI kosong
-      const replyFromAI = response.data?.choices?.[0]?.message?.content;
+      let replyFromAI = response.data?.choices?.[0]?.message?.content;
 
       if (!replyFromAI) {
-        await message.reply('⚠️ AI tidak memberikan respon teks. Silakan coba lagi.');
+        await message.reply('⚠️ AI tidak memberikan respon. Silakan coba lagi.');
         return;
       }
 
@@ -115,17 +133,46 @@ client.on('messageCreate', async (message) => {
       totalTokensUsed += tokensThisRequest;
 
       client.user.setActivity(
-        `Model: inclusionai/ling-3.0 | Used: ${totalTokensUsed.toLocaleString()} Tokens`,
+        `Model: llama-nemotron-rerank-vl | Used: ${totalTokensUsed.toLocaleString()} Tokens`,
         { type: 4 }
       );
 
-      // 5. Kirim balasan bertahap agar pesan panjang tidak kepotong
-      const chunks = replyFromAI.match(/[\s\S]{1,1900}/g) || [replyFromAI];
+      // 5. Parse jika AI ingin mengirim file menggunakan format [FILE:nama][/FILE]
+      const fileRegex = /\[FILE:(.+?)\]([\s\S]*?)\[\/FILE\]/g;
+      let match;
+      let filesToSend = [];
+
+      // Mengekstrak semua kecocokan format file dari teks AI
+      while ((match = fileRegex.exec(replyFromAI)) !== null) {
+        const fileName = match[1].trim();
+        const fileContent = match[2].trim();
+        
+        // Ubah teks dari AI menjadi buffer file
+        const buffer = Buffer.from(fileContent, 'utf-8');
+        const attachment = new AttachmentBuilder(buffer, { name: fileName });
+        filesToSend.push(attachment);
+      }
+
+      // Hapus tag file dari pesan teks agar chat Discord tetap rapi (tidak ada teks duplikat)
+      let cleanReply = replyFromAI.replace(fileRegex, '').trim();
+      if (cleanReply === '') cleanReply = '📂 *Mengirimkan file...*'; // Placeholder jika AI hanya merespon file
+
+      // 6. Kirim balasan bertahap agar pesan panjang tidak kepotong
+      const chunks = cleanReply.match(/[\s\S]{1,1900}/g) || [cleanReply];
+      
       for (let i = 0; i < chunks.length; i++) {
+        const isLastChunk = (i === chunks.length - 1);
+        
+        // Hanya lampirkan file yang digenerate AI pada pesan terakhir/chunk terakhir
+        const messageOptions = { content: chunks[i] };
+        if (isLastChunk && filesToSend.length > 0) {
+          messageOptions.files = filesToSend;
+        }
+
         if (i === 0) {
-          await message.reply(chunks[i]);
+          await message.reply(messageOptions);
         } else {
-          await message.channel.send(chunks[i]);
+          await message.channel.send(messageOptions);
         }
       }
 
