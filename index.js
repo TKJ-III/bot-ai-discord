@@ -13,14 +13,14 @@ const client = new Client({
 });
 
 // Model OpenRouter gratisan yang valid & support gambar (multimodal)
-const AI_MODEL = 'liquid/lfm-2.5-2.6b:free';
+const AI_MODEL = 'poolside/laguna-s-2.1:free';
 
 let totalTokensUsed = 0; // Akumulasi hitungan token/kredit AI
 
 // Event saat bot online
 client.once('clientReady', () => {
   console.log(`✅ Bot berhasil login sebagai: ${client.user.tag}`);
-  client.user.setActivity(`Model: liquid/lfm-2.5-2.6b:free | Used: 0 Tokens`, { type: 4 });
+  client.user.setActivity(`Model: poolside/laguna-s-2.1:free | Used: 0 Tokens`, { type: 4 });
 });
 
 client.on('messageCreate', async (message) => {
